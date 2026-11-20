@@ -27,6 +27,7 @@ import {
   showToast
 } from '../../helpers/utils'
 import {
+  generateFreshContentPoToken,
   getLocalVideoInfo,
   mapLocalLegacyFormat,
   parseLocalSubscriberCount,
@@ -55,7 +56,8 @@ import { useI18n } from 'vue-i18n'
  *     clientVersion: string,
  *     osName: string,
  *     osVersion: string
- *   }
+ *   },
+ *   refreshPoToken: (() => Promise<string | undefined>) | undefined
  * }} SabrData
  */
 
@@ -1672,7 +1674,8 @@ export default defineComponent({
         url: url.toString(),
         poToken,
         ustreamerConfig: videoInfo.player_config.media_common_config.media_ustreamer_request_config.video_playback_ustreamer_config,
-        clientInfo
+        clientInfo,
+        refreshPoToken: () => generateFreshContentPoToken(this.videoId)
       }
 
       /** @type {import('../../helpers/player/SabrManifestParser').SabrManifest} */
@@ -1988,7 +1991,8 @@ export default defineComponent({
       await this.reloadView()
     }, 1000),
 
-    async onSabrReloadRequested() {
+    async onSabrReloadRequested(cause) {
+      console.warn('SABR: player reload requested, cause:', cause ?? 'unknown')
       showToast('Reloading player according to SABR request')
       await this.saveWatchProgressForReload()
       await this.reloadView()

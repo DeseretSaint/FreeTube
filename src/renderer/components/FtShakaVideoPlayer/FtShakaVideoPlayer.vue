@@ -1311,9 +1311,9 @@ if (process.env.SUPPORTS_LOCAL_API && props.sabrData) {
       sabrAbortController.signal,
     )
   }, 1000))
-  sabrStream.onReloadOnce(() => {
+  sabrStream.onReloadOnce((cause) => {
     sabrAbortController.abort()
-    emit('player-reload-requested')
+    emit('player-reload-requested', cause)
   })
 }
 

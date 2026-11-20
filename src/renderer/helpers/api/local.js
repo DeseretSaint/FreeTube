@@ -524,6 +524,29 @@ async function getWatchHTMLWatchPage(videoId, fetchFunc) {
 }
 
 /**
+ * Mint a fresh content-bound PO token for a video without rebuilding the
+ * whole player session. The SABR scheme plugin uses this when YouTube
+ * reports the current token as pending attestation, so playback can
+ * continue without reloading the player.
+ * @param {string} videoId
+ * @returns {Promise<string | undefined>}
+ */
+export async function generateFreshContentPoToken(videoId) {
+  if (!process.env.IS_ELECTRON) {
+    return undefined
+  }
+
+  const htmlExtracts = await getWatchHTMLWatchPage(videoId, (input, init) => fetch(input, init))
+
+  return await window.ftElectron.generatePoToken(
+    videoId,
+    JSON.stringify(htmlExtracts.session.context),
+    JSON.stringify(htmlExtracts.initialAttestationData),
+    JSON.stringify(htmlExtracts.ytConfig)
+  )
+}
+
+/**
  * @param {object} ytConfig
  * @param {(input, init) => Promise<Response>} fetchFunc
  */
