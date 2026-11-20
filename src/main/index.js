@@ -320,6 +320,18 @@ function runApp() {
     app.commandLine.appendSwitch('disable-gpu')
   }
 
+  // Linux video decode through VA-API. Electron ships this off by default, so
+  // playback falls back to software decode and the CPU pays for every frame.
+  // The iGPU handles it on this machine; the driver-checks flag is needed
+  // because Mesa's AMD driver reports an old API version to Chromium.
+  if (process.platform === 'linux' && !disableHardwareAcceleration) {
+    app.commandLine.appendSwitch(
+      'enable-features',
+      'VaapiVideoDecodeLinuxGL,VaapiIgnoreDriverChecks,AcceleratedVideoDecodeLinuxGL'
+    )
+    app.commandLine.appendSwitch('ignore-gpu-blocklist')
+  }
+
   const PLAYER_CACHE_PATH = `${userDataPath}/player_cache`
 
   // See: https://stackoverflow.com/questions/45570589/electron-protocol-handler-not-working-on-windows
@@ -1031,7 +1043,11 @@ function runApp() {
       // useContentSize: true,
       webPreferences: {
         webSecurity: false,
-        backgroundThrottling: false,
+        // Was false: the renderer kept animating and decoding at full rate even
+        // with the window hidden, which is most of this app's idle cost on a
+        // locked or covered desktop. True lets Chromium throttle timers and
+        // rAF whenever the window is hidden or minimised.
+        backgroundThrottling: true,
         preload: process.env.NODE_ENV === 'development'
           ? path.resolve(__dirname, '../../dist/preload.js')
           : path.resolve(__dirname, 'preload.js')
