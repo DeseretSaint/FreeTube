@@ -62,6 +62,12 @@ import { useI18n } from 'vue-i18n'
  */
 
 const MANIFEST_TYPE_DASH = 'application/dash+xml'
+
+// Consecutive SABR reloads per video, for exponential backoff. A video that
+// keeps rejecting tokens must not be hammered: rapid reloads escalate into
+// HTTP 403 rate limits and look like a crash loop to the desktop. The streak
+// decays after a minute of quiet (i.e. playback recovered).
+const sabrReloadStreaks = new Map()
 const MANIFEST_TYPE_HLS = 'application/x-mpegurl'
 const UNAVAILABLE_VIDEO_THUMBNAILS = {
   light: 'https://www.youtube.com/img/desktop/unavailable/unavailable_video.png',
@@ -2000,6 +2006,22 @@ export default defineComponent({
 
     async onSabrReloadRequested(cause) {
       console.warn('SABR: player reload requested, cause:', cause ?? 'unknown')
+
+      const streak = sabrReloadStreaks.get(this.videoId) ?? { count: 0, lastAt: 0 }
+      const now = Date.now()
+      if (now - streak.lastAt > 60000) {
+        streak.count = 0
+      }
+      streak.count += 1
+      streak.lastAt = now
+      sabrReloadStreaks.set(this.videoId, streak)
+
+      const backoffMs = Math.min(1500 * 2 ** (streak.count - 1), 20000)
+      if (backoffMs > 1500) {
+        console.warn(`SABR: backing off ${backoffMs}ms before reload (streak ${streak.count})`)
+        await new Promise(resolve => setTimeout(resolve, backoffMs))
+      }
+
       showToast('Reloading player according to SABR request')
       await this.saveWatchProgressForReload()
       await this.reloadView()

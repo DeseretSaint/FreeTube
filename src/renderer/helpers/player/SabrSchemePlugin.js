@@ -68,6 +68,8 @@ const ShakaError = shaka.util.Error
  * @property {number} poTokenRefreshCount
  * @property {boolean} poTokenRefreshPending
  * @property {boolean} poTokenRefreshAccepted
+ * @property {number} poTokenGeneration
+ * @property {number} lastMintAt
  * @property {(() => Promise<string | undefined>) | undefined} refreshPoToken
  */
 /**
@@ -313,6 +315,13 @@ async function refreshPoTokenInPlace(currentState) {
     return
   }
 
+  // Give the previous mint time to be graded. Without a cooldown, back-to-back
+  // status-2 parts mint the whole budget in a few seconds, before the server
+  // has accepted any of them.
+  if (Date.now() - sabrStreamState.lastMintAt < 4000) {
+    return
+  }
+
   if (sabrStreamState.poTokenRefreshCount >= 3) {
     // Out of mints. A pending-attestation session only serves ~60 s of media,
     // so waiting for the backoff loop to notice burns that window for nothing.
@@ -323,6 +332,7 @@ async function refreshPoTokenInPlace(currentState) {
 
   sabrStreamState.poTokenRefreshPending = true
   sabrStreamState.poTokenRefreshCount += 1
+  sabrStreamState.lastMintAt = Date.now()
 
   try {
     const newPoToken = await sabrStreamState.refreshPoToken()
@@ -331,6 +341,7 @@ async function refreshPoTokenInPlace(currentState) {
       const poTokenU8 = base64ToU8(newPoToken)
       sabrStreamState.poToken = poTokenU8
       currentState.abrRequest.streamerContext.poToken = poTokenU8
+      sabrStreamState.poTokenGeneration += 1
       console.warn(`SABR: replacement PO token minted (gen ${sabrStreamState.poTokenRefreshCount})`)
     }
   } catch (error) {
@@ -357,6 +368,10 @@ async function doRequest(
 
   let invalidPoToken = false
   let error
+
+  // The token generation this request's body was encoded with. Responses
+  // grading a superseded generation must not trigger another refresh.
+  const requestGeneration = currentState.sabrStreamState.poTokenGeneration
 
   if (currentState.sabrStreamState.playerReloadRequested) {
     // Multiple requests might be issued at the same time, other requests should abort themselves once reload requested
@@ -414,8 +429,13 @@ async function doRequest(
               }
             } else if (streamProtectionStatus.status === 2) {
               // Attestation pending: refresh the token in place so playback
-              // continues without a player reload.
-              refreshPoTokenInPlace(currentState)
+              // continues without a player reload. Only act when the server is
+              // grading the CURRENT token — a status-2 for a superseded
+              // generation is an echo of the old token still in flight, and
+              // minting on it burns the budget before the new token is graded.
+              if (requestGeneration === currentState.sabrStreamState.poTokenGeneration) {
+                refreshPoTokenInPlace(currentState)
+              }
             } else if (streamProtectionStatus.status === 3) {
               invalidPoToken = true
               // Token rejected outright: a refresh cannot land before the
@@ -727,6 +747,8 @@ export function setupSabrScheme(sabrData, getPlayer, getManifest, playerWidth, p
     poTokenRefreshCount: 0,
     poTokenRefreshPending: false,
     poTokenRefreshAccepted: false,
+    poTokenGeneration: 0,
+    lastMintAt: 0,
     refreshPoToken: sabrData.refreshPoToken,
   }
 
