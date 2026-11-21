@@ -2302,6 +2302,8 @@ function keyboardShortcutHandler(event) {
     return
   }
 
+  lastKeyboardShortcutAt = Date.now()
+
   switch (event.key.toLowerCase()) {
     case KeyboardShortcuts.VIDEO_PLAYER.GENERAL.FULLSCREEN:
       // Toggle full screen
@@ -3292,7 +3294,16 @@ const valueChangeIcon = ref(null)
 const invertValueChangeContentOrder = ref(false)
 let valueChangeTimeout = null
 
+// Keyboard playback shortcuts give feedback through the center popup; popping
+// the control bar on every arrow-key seek is visual noise, especially in
+// full-window mode. Calls made synchronously from the keyboard handler are
+// suppressed; mouse-driven calls into the same helpers still show the bar.
+let lastKeyboardShortcutAt = 0
+
 function showOverlayControls() {
+  if (Date.now() - lastKeyboardShortcutAt < 150) {
+    return
+  }
   ui.getControls().showUI()
 }
 
