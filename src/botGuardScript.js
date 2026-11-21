@@ -17,12 +17,12 @@ export default async function (videoId, context, initialAttestationData, ytConfi
 
   let challengeData = initialAttestationData.R
 
-  if (!challengeData.bgChallenge) {
-    throw new Error('Failed to get BotGuard challenge')
-  }
+  let interpreterUrl = challengeData.bgChallenge?.interpreterUrl?.privateDoNotAccessOrElseTrustedResourceUrlWrappedValue
 
-  let interpreterUrl = challengeData.bgChallenge.interpreterUrl?.privateDoNotAccessOrElseTrustedResourceUrlWrappedValue
-
+  // A stored page can yield no usable challenge (absent, or without an
+  // interpreter URL). Ask for a fresh one bound to the SAME visitor rather than
+  // failing the mint: this is the only recovery path when a session's stored
+  // attestation has gone stale, so it has to run before any bail-out.
   if (!interpreterUrl) {
     const challengeResponse = await fetch(
       'https://www.youtube.com/youtubei/v1/att/get?prettyPrint=false&alt=json',

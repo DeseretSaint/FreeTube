@@ -531,18 +531,28 @@ async function getWatchHTMLWatchPage(videoId, fetchFunc) {
  * @param {string} videoId
  * @returns {Promise<string | undefined>}
  */
-export async function generateFreshContentPoToken(videoId) {
+export async function generateFreshContentPoToken(videoId, sessionExtracts) {
   if (!process.env.IS_ELECTRON) {
     return undefined
   }
 
-  const htmlExtracts = await getWatchHTMLWatchPage(videoId, (input, init) => fetch(input, init))
+  // A PO token is only honoured by a stream that shares its visitor identity,
+  // and every watch-page fetch here is cookieless with set-cookie stripped, so
+  // a refetch answers with a NEW visitorData. Refreshing therefore has to mint
+  // from the extracts the playback was started with: the BotGuard run still
+  // creates a fresh minter, which is what a rejected session actually needs.
+  // Never fall back to a refetch here - it produces a token that is guaranteed
+  // to be rejected and only hides the real failure.
+  if (!sessionExtracts?.context) {
+    console.warn('FreeTube: refusing to refresh a PO token without the session extracts')
+    return undefined
+  }
 
   return await window.ftElectron.generatePoToken(
     videoId,
-    JSON.stringify(htmlExtracts.session.context),
-    JSON.stringify(htmlExtracts.initialAttestationData),
-    JSON.stringify(htmlExtracts.ytConfig)
+    sessionExtracts.context,
+    sessionExtracts.initialAttestationData,
+    sessionExtracts.ytConfig
   )
 }
 
@@ -683,13 +693,22 @@ export async function getLocalVideoInfo(id) {
   // based on the videoId
   let contentPoToken
 
+  // Keep the extracts this playback's token was minted from. An in-place
+  // refresh has to mint again under the SAME visitorData; a refetched watch
+  // page answers with a different one and the replacement token is rejected.
+  const poTokenRegenContext = {
+    context: JSON.stringify(htmlExtracts.session.context),
+    initialAttestationData: JSON.stringify(htmlExtracts.initialAttestationData),
+    ytConfig: JSON.stringify(htmlExtracts.ytConfig)
+  }
+
   if (process.env.IS_ELECTRON) {
     try {
       contentPoToken = await window.ftElectron.generatePoToken(
         id,
-        JSON.stringify(htmlExtracts.session.context),
-        JSON.stringify(htmlExtracts.initialAttestationData),
-        JSON.stringify(htmlExtracts.ytConfig)
+        poTokenRegenContext.context,
+        poTokenRegenContext.initialAttestationData,
+        poTokenRegenContext.ytConfig
       )
 
       player.po_token = contentPoToken
@@ -756,6 +775,10 @@ export async function getLocalVideoInfo(id) {
   const cpn = Utils.generateRandomString(16)
 
   const info = new YT.VideoInfo([playerResponse, nextResponse], htmlExtracts.session.actions, cpn)
+
+  // Carried through to the SABR session so an in-place PO token refresh mints
+  // under this playback's visitor identity, not a freshly fetched page's.
+  info.poTokenRegenContext = poTokenRegenContext
 
   // Some time would be used for parsing and maybe additional requests so end time should be calculated sooner to reduce actual waiting time
   // Legacy format requires this

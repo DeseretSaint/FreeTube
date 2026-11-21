@@ -305,11 +305,19 @@ function requestPlayerReload(currentState, cause) {
 async function refreshPoTokenInPlace(currentState) {
   const { sabrStreamState } = currentState
 
-  if (
-    typeof sabrStreamState.refreshPoToken !== 'function' ||
-    sabrStreamState.poTokenRefreshPending ||
-    sabrStreamState.poTokenRefreshCount >= 3
-  ) {
+  if (typeof sabrStreamState.refreshPoToken !== 'function') {
+    return
+  }
+
+  if (sabrStreamState.poTokenRefreshPending) {
+    return
+  }
+
+  if (sabrStreamState.poTokenRefreshCount >= 3) {
+    // Out of mints. A pending-attestation session only serves ~60 s of media,
+    // so waiting for the backoff loop to notice burns that window for nothing.
+    // Reload now, with a cause distinct from an outright rejection.
+    requestPlayerReload(currentState, 'po-token-refresh-exhausted')
     return
   }
 
@@ -393,7 +401,18 @@ async function doRequest(
             const streamProtectionStatus = decodePart(data, StreamProtectionStatus)
             if (!streamProtectionStatus) break
 
-            if (streamProtectionStatus.status === 2) {
+            if (streamProtectionStatus.status === 1) {
+              // The only trustworthy acceptance signal: the server accepted the
+              // token carried by THIS request. A segment completing is not one,
+              // since it can still be served with the previous token.
+              if (
+                currentState.sabrStreamState.poTokenRefreshCount > 0 &&
+                !currentState.sabrStreamState.poTokenRefreshAccepted
+              ) {
+                currentState.sabrStreamState.poTokenRefreshAccepted = true
+                console.warn(`SABR: replacement PO token accepted after ${currentState.sabrStreamState.poTokenRefreshCount} refresh(es)`)
+              }
+            } else if (streamProtectionStatus.status === 2) {
               // Attestation pending: refresh the token in place so playback
               // continues without a player reload.
               refreshPoTokenInPlace(currentState)
@@ -561,11 +580,6 @@ async function doRequest(
   }
 
   if (responseDataChunks.length > 0 && segmentComplete) {
-    if (currentState.sabrStreamState.poTokenRefreshCount > 0 && !currentState.sabrStreamState.poTokenRefreshAccepted) {
-      currentState.sabrStreamState.poTokenRefreshAccepted = true
-      console.warn(`SABR: replacement PO token accepted after ${currentState.sabrStreamState.poTokenRefreshCount} refresh(es)`)
-    }
-
     const data = /** @__NOINLINE__ */ concatenateChunks(responseDataChunks)
 
     if (operationInputs.isInit) {
@@ -596,6 +610,14 @@ async function doRequest(
     let body
 
     try {
+      // A refresh replaces the token mid-session (see refreshPoTokenInPlace),
+      // but each request chain encodes from its own abrRequest, and audio and
+      // video run independent chains. Reading the shared state here is what
+      // makes a refresh apply to every live chain; a snapshot taken when the
+      // chain was created leaves one of them sending the rejected token, which
+      // escalates to status 3 and throws away a good token.
+      currentState.abrRequest.streamerContext.poToken = currentState.sabrStreamState.poToken
+
       body = VideoPlaybackAbrRequest.encode(currentState.abrRequest).finish()
     } catch (error) {
       console.error('Invalid VideoPlaybackAbrRequest data', currentState.abrRequest)

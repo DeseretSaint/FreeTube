@@ -1670,12 +1670,19 @@ export default defineComponent({
       url.searchParams.set('alr', 'yes')
       url.searchParams.set('cpn', videoInfo.cpn)
 
+      // Capture both here: a refresh that reads `this.videoId` at call time can
+      // mint for a different video after a route change, and holding the whole
+      // video info object alive for the session keeps the parsed page in memory
+      // for no reason.
+      const sabrVideoId = this.videoId
+      const regenContext = videoInfo.poTokenRegenContext
+
       this.sabrData = {
         url: url.toString(),
         poToken,
         ustreamerConfig: videoInfo.player_config.media_common_config.media_ustreamer_request_config.video_playback_ustreamer_config,
         clientInfo,
-        refreshPoToken: () => generateFreshContentPoToken(this.videoId)
+        refreshPoToken: () => generateFreshContentPoToken(sabrVideoId, regenContext)
       }
 
       /** @type {import('../../helpers/player/SabrManifestParser').SabrManifest} */
