@@ -68,6 +68,12 @@ const MANIFEST_TYPE_DASH = 'application/dash+xml'
 // HTTP 403 rate limits and look like a crash loop to the desktop. The streak
 // decays after a minute of quiet (i.e. playback recovered).
 const sabrReloadStreaks = new Map()
+
+// Bot challenges ("Sign in to confirm you're not a bot" / "Please sign in")
+// are probabilistic, not bans: reloading the same video on the same IP usually
+// succeeds. Track the last silent auto-retry per video so a genuinely blocked
+// IP shows the error instead of looping forever.
+const botChallengeRetries = new Map()
 const MANIFEST_TYPE_HLS = 'application/x-mpegurl'
 const UNAVAILABLE_VIDEO_THUMBNAILS = {
   light: 'https://www.youtube.com/img/desktop/unavailable/unavailable_video.png',
@@ -717,6 +723,22 @@ export default defineComponent({
           let errorText
 
           if (playabilityStatus.reason === BOT_MESSAGE || playabilityStatus.reason === 'Please sign in') {
+            // Retry once silently before showing the IP-block error: the
+            // challenge is probabilistic and a fresh session on the same IP
+            // usually passes. Keep the loading state while the retry runs.
+            const lastRetry = botChallengeRetries.get(this.videoId) ?? 0
+            if (Date.now() - lastRetry > 60000) {
+              botChallengeRetries.set(this.videoId, Date.now())
+              console.warn('IP: bot challenge on /player, auto-retrying once')
+              const videoId = this.videoId
+              setTimeout(() => {
+                if (this.videoId === videoId) {
+                  this.reloadView()
+                }
+              }, 1500)
+              return
+            }
+            console.warn('IP: bot challenge persists after auto-retry')
             errorText = this.t('Video.IP block')
           } else {
             errorText = `[${playabilityStatus.status}] ${playabilityStatus.reason}`
