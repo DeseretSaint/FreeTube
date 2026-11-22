@@ -26,6 +26,26 @@ const ALLOWED_LINK_PROTOCOLS = ['http:', 'https:']
 const SCHEMELESS_DOMAIN_URL_PATTERN = /^(?:\/\/)?[^./?#:@\s]+(?:\.[^./?#:@\s]+)+(?::\d+)?(?:[/?#]|$)/
 const YOUTUBE_REDIRECT_HOSTS = ['youtube.com', 'www.youtube.com']
 
+// How long to keep using the YouTube home page's ytcfg after a captcha'd watch
+// page. Challenges are per request, so this only needs to cover a bad spell.
+const HOMEPAGE_FALLBACK_MS = 5 * 60 * 1000
+
+/**
+ * True when a raw Innertube /player payload is YouTube's bot challenge rather
+ * than a real playability failure. These are probabilistic, not bans.
+ * @param {any} data
+ */
+function isBotChallengeResponse(data) {
+  const playabilityStatus = data?.playabilityStatus ?? data?.playability_status
+  if (!playabilityStatus) {
+    return false
+  }
+
+  // The apostrophe is intentionally that one (char code 8217), because that is the one YouTube uses
+  return playabilityStatus.reason === 'Sign in to confirm you’re not a bot' ||
+    playabilityStatus.reason === 'Please sign in'
+}
+
 /**
  * @param {URL} url
  * @returns {string|null|undefined} The q value, null when missing, or undefined for a non-redirect URL.
@@ -469,9 +489,18 @@ async function getWatchHTMLWatchPage(videoId, fetchFunc) {
   /** @type {string | undefined} */
   let playerId
 
-  if (sessionStorage.getItem('playerHtmlHomepageFallback') === '1') {
+  // A captcha'd watch page used to pin the session to the YouTube home page
+  // until the app restarted ("getting it once is a sign that it will continue
+  // happening"). That assumption is wrong: challenges are decided per request
+  // and clear on their own, and the home page's ytcfg makes every later video
+  // do an extra unattested request. Only avoid the watch page for a while.
+  const homepageFallbackSince = Number(sessionStorage.getItem('playerHtmlHomepageFallback'))
+  const useHomepageFallback = homepageFallbackSince > 0 && Date.now() - homepageFallbackSince < HOMEPAGE_FALLBACK_MS
+
+  if (useHomepageFallback) {
     ({ ytConfig, initialAttestationData, playerId } = await getHTMLPage('https://www.youtube.com', 'home'))
   } else {
+    sessionStorage.removeItem('playerHtmlHomepageFallback')
     try {
       ({ htmlPage, ytConfig, initialAttestationData, playerId } = await getHTMLPage(`https://www.youtube.com/watch?v=${videoId}&bpctr=9999999999&has_verified=1`, 'watch'))
 
@@ -501,11 +530,11 @@ async function getWatchHTMLWatchPage(videoId, fetchFunc) {
         console.warn('Could not find /next response in the HTML page')
       }
     } catch (watchError) {
-      console.warn('Falling back to the YT home page for the rest of the session because of:', watchError)
+      console.warn('Falling back to the YT home page for a few minutes because of:', watchError)
 
-      // Fall back to the home page for the rest of the session/until FreeTube is restarted
-      // assuming that getting the watch page captcha once is a sign that it will continue happening
-      sessionStorage.setItem('playerHtmlHomepageFallback', '1');
+      // Fall back to the home page for a while, then try the watch page again:
+      // a captcha is per request and clears, so the fallback must not latch.
+      sessionStorage.setItem('playerHtmlHomepageFallback', String(Date.now()));
 
       ({ ytConfig, initialAttestationData, playerId } = await getHTMLPage('https://www.youtube.com', 'home'))
     }
@@ -756,6 +785,58 @@ export async function getLocalVideoInfo(id) {
       nextResponse = await htmlExtracts.session.actions.execute('/next', requestBody)
     }
   }
+
+  // Debug aid for the challenge path, so it can be tested without waiting for
+  // YouTube to decide. sessionStorage 'ftSimChallengeMode':
+  //   'attested' pretends the page response was challenged, to prove the
+  //              attested /player call recovers the video;
+  //   'retry'    pretends the challenge survived the attested call, to drive
+  //              the silent retry loop in Watch.js.
+  const challengeSimMode = sessionStorage.getItem('ftSimChallengeMode')
+  const injectSimChallenge = (mode) => {
+    if (challengeSimMode !== mode || isBotChallengeResponse(playerResponse?.data)) {
+      return false
+    }
+
+    playerResponse = {
+      data: {
+        ...playerResponse.data,
+        playabilityStatus: {
+          status: 'LOGIN_REQUIRED',
+          reason: 'Sign in to confirm you’re not a bot'
+        }
+      }
+    }
+    console.warn(`IP: [sim] injected bot challenge (${mode})`)
+    return true
+  }
+
+  injectSimChallenge('attested')
+
+  // A challenge here means YouTube refused the unauthenticated watch-page
+  // request. We already hold a content-bound PO token for this exact visitor,
+  // and an attested /player call is precisely what that token is for, so ask
+  // again with it before treating the video as blocked. When this lands,
+  // playback starts without a page reload at all.
+  if (contentPoToken && isBotChallengeResponse(playerResponse?.data)) {
+    console.warn('IP: page response was a bot challenge, re-requesting /player with this session\'s PO token')
+
+    try {
+      const attestedResponse = await htmlExtracts.session.actions.execute('/player', createPlayerRequestBody(id, player.signature_timestamp, contentPoToken))
+
+      if (attestedResponse.data?.playabilityStatus?.status === 'OK' && !isBotChallengeResponse(attestedResponse.data)) {
+        totalAdTimeMilliseconds = extractTotalAdTimeMilliseconds(attestedResponse.data)
+        playerResponse = { data: attestedResponse.data }
+        console.warn('IP: attested /player accepted, continuing without a reload')
+      } else {
+        console.warn('IP: attested /player was challenged too:', attestedResponse.data?.playabilityStatus?.status, attestedResponse.data?.playabilityStatus?.reason)
+      }
+    } catch (error) {
+      console.warn('IP: attested /player request failed:', error)
+    }
+  }
+
+  injectSimChallenge('retry')
 
   if (
     playerResponse?.data &&

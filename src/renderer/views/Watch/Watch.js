@@ -73,6 +73,8 @@ const sabrReloadStreaks = new Map()
 // are probabilistic, not bans: reloading the same video on the same IP usually
 // succeeds. Track the last silent auto-retry per video so a genuinely blocked
 // IP shows the error instead of looping forever.
+const BOT_CHALLENGE_MAX_RETRIES = 6
+const BOT_CHALLENGE_RETRY_WINDOW_MS = 120000
 const botChallengeRetries = new Map()
 const MANIFEST_TYPE_HLS = 'application/x-mpegurl'
 const UNAVAILABLE_VIDEO_THUMBNAILS = {
@@ -723,22 +725,35 @@ export default defineComponent({
           let errorText
 
           if (playabilityStatus.reason === BOT_MESSAGE || playabilityStatus.reason === 'Please sign in') {
-            // Retry once silently before showing the IP-block error: the
-            // challenge is probabilistic and a fresh session on the same IP
-            // usually passes. Keep the loading state while the retry runs.
-            const lastRetry = botChallengeRetries.get(this.videoId) ?? 0
-            if (Date.now() - lastRetry > 60000) {
-              botChallengeRetries.set(this.videoId, Date.now())
-              console.warn('IP: bot challenge on /player, auto-retrying once')
+            // A challenge is a probabilistic, per-request decision by YouTube,
+            // not a ban: the same IP gets the same video on a later attempt.
+            // One retry 1.5 s later is not enough - challenges arrive in
+            // bursts tens of seconds long, so retry with exponential backoff
+            // and jitter, keeping the loading state up, and only surface the
+            // error once the budget is spent.
+            const now = Date.now()
+            const retryState = botChallengeRetries.get(this.videoId) ?? { attempts: 0, firstAt: now }
+            if (now - retryState.firstAt > BOT_CHALLENGE_RETRY_WINDOW_MS) {
+              retryState.attempts = 0
+              retryState.firstAt = now
+            }
+
+            if (retryState.attempts < BOT_CHALLENGE_MAX_RETRIES) {
+              retryState.attempts++
+              botChallengeRetries.set(this.videoId, retryState)
+
+              const retryDelay = Math.min(2000 * 2 ** (retryState.attempts - 1), 30000) + Math.round(Math.random() * 1000)
+              console.warn(`IP: bot challenge on /player, silent retry ${retryState.attempts}/${BOT_CHALLENGE_MAX_RETRIES} in ${retryDelay} ms`)
+
               const videoId = this.videoId
               setTimeout(() => {
                 if (this.videoId === videoId) {
                   this.reloadView()
                 }
-              }, 1500)
+              }, retryDelay)
               return
             }
-            console.warn('IP: bot challenge persists after auto-retry')
+            console.warn(`IP: bot challenge persists after ${BOT_CHALLENGE_MAX_RETRIES} silent retries`)
             errorText = this.t('Video.IP block')
           } else {
             errorText = `[${playabilityStatus.status}] ${playabilityStatus.reason}`
@@ -758,6 +773,9 @@ export default defineComponent({
             return
           }
         }
+
+        // Playable again: forget the retry budget for this video.
+        botChallengeRetries.delete(this.videoId)
 
         if (!this.hideLiveChat && (this.isLive || this.isUpcoming) && result.livechat) {
           this.liveChat = result.getLiveChat()
